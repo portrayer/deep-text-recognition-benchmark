@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+python train.py \
+  --train_data lmdb_train \
+  --valid_data lmdb_val \
+  --select_data "/" \
+  --batch_ratio 1.0 \
+  --Transformation TPS \
+  --FeatureExtraction ResNet \
+  --SequenceModeling BiLSTM \
+  --Prediction Attn \
+  --workers 4 \
+  --batch_size 256 \
+  --num_iter 10000 \
+  --valInterval 100 \
+  --adam --sensitive \
+  --character "()+123456ABCFHKMNOPSZ_aeglnu{}·↑→↓光加温点热照燃电通高"

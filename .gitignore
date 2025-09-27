@@ -206,3 +206,9 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+
+/data
+/lmdb_train
+/lmdb_val
+
+.idea
