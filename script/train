@@ -14,4 +14,4 @@ python train.py \
   --num_iter 10000 \
   --valInterval 100 \
   --adam --sensitive \
-  --character "()+123456ABCFHKMNOPSZ_aeglnu{}·↑→↓光加温点热照燃电通高"
+  --character "()+123456ABCFHKMNOPSZaeglnu·↑→↓光加温点热照燃电通高"
