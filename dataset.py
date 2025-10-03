@@ -112,12 +112,12 @@ class Batch_Balanced_Dataset(object):
 
         for i, data_loader_iter in enumerate(self.dataloader_iter_list):
             try:
-                image, text = data_loader_iter.next()
+                image, text = next(data_loader_iter)
                 balanced_batch_images.append(image)
                 balanced_batch_texts += text
             except StopIteration:
                 self.dataloader_iter_list[i] = iter(self.data_loader_list[i])
-                image, text = self.dataloader_iter_list[i].next()
+                image, text = next(self.dataloader_iter_list[i])
                 balanced_batch_images.append(image)
                 balanced_batch_texts += text
             except ValueError:
@@ -143,7 +143,8 @@ def hierarchical_dataset(root, opt, select_data='/'):
                     break
 
             if select_flag:
-                dataset = OCRDataset(dirpath, opt)
+                print(dirpath)
+                dataset = OCRDataset(root, opt)
                 sub_dataset_log = f'sub-directory:\t/{os.path.relpath(dirpath, root)}\t num samples: {len(dataset)}'
                 print(sub_dataset_log)
                 dataset_log += f'{sub_dataset_log}\n'
@@ -160,7 +161,15 @@ class OCRDataset(Dataset):
         self.root = root
         self.opt = opt
         print(root)
-        self.df = pd.read_csv(os.path.join(root,'labels.csv'), sep='^([^,]+),', engine='python', usecols=['filename', 'words'], keep_default_na=False)
+        #self.df = pd.read_csv(os.path.join(root,'labels.csv'), sep='^([^,]+),', engine='python', usecols=['filename', 'words'], keep_default_na=False)
+        self.df = pd.read_csv(
+            os.path.join(root, 'labels.csv'),
+            sep=r"\s+",            # 用空格或多个空格作为分隔符
+            header=None,           # 文件中没有列名
+            names=['filename', 'words'],  # 自定义列名
+            engine='python',       # 可选，加上更兼容正则
+            keep_default_na=False  # 不把 "NaN" 当作缺失值
+        )
         self.nSamples = len(self.df)
 
         if self.opt.data_filtering_off:
