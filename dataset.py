@@ -3,8 +3,8 @@ import sys
 import re
 import six
 import math
-import lmdb
 import torch
+import pandas  as pd
 
 from natsort import natsorted
 from PIL import Image
@@ -27,6 +27,21 @@ def _accumulate(iterable, fn=lambda x, y: x + y):
         total = fn(total, element)
         yield total
 
+def contrast_grey(img):
+    high = np.percentile(img, 90)
+    low  = np.percentile(img, 10)
+    return (high-low)/(high+low), high, low
+
+def adjust_contrast_grey(img, target = 0.4):
+    contrast, high, low = contrast_grey(img)
+    if contrast < target:
+        img = img.astype(int)
+        ratio = 200./(high-low)
+        img = (img - low + 25)*ratio
+        img = np.maximum(np.full(img.shape, 0) ,np.minimum(np.full(img.shape, 255), img)).astype(np.uint8)
+    return img
+
+
 class Batch_Balanced_Dataset(object):
 
     def __init__(self, opt):
@@ -35,7 +50,7 @@ class Batch_Balanced_Dataset(object):
         For example, when select_data is "MJ-ST" and batch_ratio is "0.5-0.5",
         the 50% of the batch is filled with MJ and the other 50% of the batch is filled with ST.
         """
-        log = open(f'./saved_models/{opt.exp_name}/log_dataset.txt', 'a')
+        log = open(f'./saved_models/{opt.experiment_name}/log_dataset.txt', 'a')
         dashed_line = '-' * 80
         print(dashed_line)
         log.write(dashed_line + '\n')
@@ -43,7 +58,7 @@ class Batch_Balanced_Dataset(object):
         log.write(f'dataset_root: {opt.train_data}\nopt.select_data: {opt.select_data}\nopt.batch_ratio: {opt.batch_ratio}\n')
         assert len(opt.select_data) == len(opt.batch_ratio)
 
-        _AlignCollate = AlignCollate(imgH=opt.imgH, imgW=opt.imgW, keep_ratio_with_pad=opt.PAD)
+        _AlignCollate = AlignCollate(imgH=opt.imgH, imgW=opt.imgW, keep_ratio_with_pad=opt.PAD, contrast_adjust = opt.contrast_adjust)
         self.data_loader_list = []
         self.dataloader_iter_list = []
         batch_size_list = []
@@ -76,7 +91,7 @@ class Batch_Balanced_Dataset(object):
             _data_loader = torch.utils.data.DataLoader(
                 _dataset, batch_size=_batch_size,
                 shuffle=True,
-                num_workers=int(opt.workers),
+                num_workers=int(opt.workers), #prefetch_factor=2,persistent_workers=True,
                 collate_fn=_AlignCollate, pin_memory=True)
             self.data_loader_list.append(_data_loader)
             self.dataloader_iter_list.append(iter(_data_loader))
@@ -97,12 +112,12 @@ class Batch_Balanced_Dataset(object):
 
         for i, data_loader_iter in enumerate(self.dataloader_iter_list):
             try:
-                image, text = next(data_loader_iter)
+                image, text = data_loader_iter.next()
                 balanced_batch_images.append(image)
                 balanced_batch_texts += text
             except StopIteration:
                 self.dataloader_iter_list[i] = iter(self.data_loader_list[i])
-                image, text = next(self.dataloader_iter_list[i])
+                image, text = self.dataloader_iter_list[i].next()
                 balanced_batch_images.append(image)
                 balanced_batch_texts += text
             except ValueError:
@@ -128,7 +143,7 @@ def hierarchical_dataset(root, opt, select_data='/'):
                     break
 
             if select_flag:
-                dataset = LmdbDataset(dirpath, opt)
+                dataset = OCRDataset(dirpath, opt)
                 sub_dataset_log = f'sub-directory:\t/{os.path.relpath(dirpath, root)}\t num samples: {len(dataset)}'
                 print(sub_dataset_log)
                 dataset_log += f'{sub_dataset_log}\n'
@@ -138,133 +153,55 @@ def hierarchical_dataset(root, opt, select_data='/'):
 
     return concatenated_dataset, dataset_log
 
-
-class LmdbDataset(Dataset):
+class OCRDataset(Dataset):
 
     def __init__(self, root, opt):
 
         self.root = root
         self.opt = opt
-        self.env = lmdb.open(root, max_readers=32, readonly=True, lock=False, readahead=False, meminit=False)
-        if not self.env:
-            print('cannot create lmdb from %s' % (root))
-            sys.exit(0)
+        print(root)
+        self.df = pd.read_csv(os.path.join(root,'labels.csv'), sep='^([^,]+),', engine='python', usecols=['filename', 'words'], keep_default_na=False)
+        self.nSamples = len(self.df)
 
-        with self.env.begin(write=False) as txn:
-            nSamples = int(txn.get('num-samples'.encode()))
-            self.nSamples = nSamples
-
-            if self.opt.data_filtering_off:
-                # for fast check or benchmark evaluation with no filtering
-                self.filtered_index_list = [index + 1 for index in range(self.nSamples)]
-            else:
-                """ Filtering part
-                If you want to evaluate IC15-2077 & CUTE datasets which have special character labels,
-                use --data_filtering_off and only evaluate on alphabets and digits.
-                see https://github.com/clovaai/deep-text-recognition-benchmark/blob/6593928855fb7abb999a99f428b3e4477d4ae356/dataset.py#L190-L192
-
-                And if you want to evaluate them with the model trained with --sensitive option,
-                use --sensitive and --data_filtering_off,
-                see https://github.com/clovaai/deep-text-recognition-benchmark/blob/dff844874dbe9e0ec8c5a52a7bd08c7f20afe704/test.py#L137-L144
-                """
-                self.filtered_index_list = []
-                for index in range(self.nSamples):
-                    index += 1  # lmdb starts with 1
-                    label_key = 'label-%09d'.encode() % index
-                    label = txn.get(label_key).decode('utf-8')
-
+        if self.opt.data_filtering_off:
+            self.filtered_index_list = [index + 1 for index in range(self.nSamples)]
+        else:
+            self.filtered_index_list = []
+            for index in range(self.nSamples):
+                label = self.df.at[index,'words']
+                try:
                     if len(label) > self.opt.batch_max_length:
-                        # print(f'The length of the label is longer than max_length: length
-                        # {len(label)}, {label} in dataset {self.root}')
                         continue
-
-                    # By default, images containing characters which are not in opt.character are filtered.
-                    # You can add [UNK] token to `opt.character` in utils.py instead of this filtering.
-                    out_of_char = f'[^{self.opt.character}]'
-                    if re.search(out_of_char, label.lower()):
-                        continue
-
-                    self.filtered_index_list.append(index)
-
-                self.nSamples = len(self.filtered_index_list)
+                except:
+                    print(label)
+                out_of_char = f'[^{self.opt.character}]'
+                if re.search(out_of_char, label.lower()):
+                    continue
+                self.filtered_index_list.append(index)
+            self.nSamples = len(self.filtered_index_list)
 
     def __len__(self):
         return self.nSamples
 
     def __getitem__(self, index):
-        assert index <= len(self), 'index range error'
         index = self.filtered_index_list[index]
+        img_fname = self.df.at[index,'filename']
+        img_fpath = os.path.join(self.root, img_fname)
+        label = self.df.at[index,'words']
 
-        with self.env.begin(write=False) as txn:
-            label_key = 'label-%09d'.encode() % index
-            label = txn.get(label_key).decode('utf-8')
-            img_key = 'image-%09d'.encode() % index
-            imgbuf = txn.get(img_key)
+        if self.opt.rgb:
+            img = Image.open(img_fpath).convert('RGB')  # for color image
+        else:
+            img = Image.open(img_fpath).convert('L')
 
-            buf = six.BytesIO()
-            buf.write(imgbuf)
-            buf.seek(0)
-            try:
-                if self.opt.rgb:
-                    img = Image.open(buf).convert('RGB')  # for color image
-                else:
-                    img = Image.open(buf).convert('L')
+        if not self.opt.sensitive:
+            label = label.lower()
 
-            except IOError:
-                print(f'Corrupted image for {index}')
-                # make dummy image and dummy label for corrupted image.
-                if self.opt.rgb:
-                    img = Image.new('RGB', (self.opt.imgW, self.opt.imgH))
-                else:
-                    img = Image.new('L', (self.opt.imgW, self.opt.imgH))
-                label = '[dummy_label]'
-
-            if not self.opt.sensitive:
-                label = label.lower()
-
-            # We only train and evaluate on alphanumerics (or pre-defined character set in train.py)
-            out_of_char = f'[^{self.opt.character}]'
-            label = re.sub(out_of_char, '', label)
+        # We only train and evaluate on alphanumerics (or pre-defined character set in train.py)
+        out_of_char = f'[^{self.opt.character}]'
+        label = re.sub(out_of_char, '', label)
 
         return (img, label)
-
-
-class RawDataset(Dataset):
-
-    def __init__(self, root, opt):
-        self.opt = opt
-        self.image_path_list = []
-        for dirpath, dirnames, filenames in os.walk(root):
-            for name in filenames:
-                _, ext = os.path.splitext(name)
-                ext = ext.lower()
-                if ext == '.jpg' or ext == '.jpeg' or ext == '.png':
-                    self.image_path_list.append(os.path.join(dirpath, name))
-
-        self.image_path_list = natsorted(self.image_path_list)
-        self.nSamples = len(self.image_path_list)
-
-    def __len__(self):
-        return self.nSamples
-
-    def __getitem__(self, index):
-
-        try:
-            if self.opt.rgb:
-                img = Image.open(self.image_path_list[index]).convert('RGB')  # for color image
-            else:
-                img = Image.open(self.image_path_list[index]).convert('L')
-
-        except IOError:
-            print(f'Corrupted image for {index}')
-            # make dummy image and dummy label for corrupted image.
-            if self.opt.rgb:
-                img = Image.new('RGB', (self.opt.imgW, self.opt.imgH))
-            else:
-                img = Image.new('L', (self.opt.imgW, self.opt.imgH))
-
-        return (img, self.image_path_list[index])
-
 
 class ResizeNormalize(object):
 
@@ -302,10 +239,11 @@ class NormalizePAD(object):
 
 class AlignCollate(object):
 
-    def __init__(self, imgH=32, imgW=100, keep_ratio_with_pad=False):
+    def __init__(self, imgH=32, imgW=100, keep_ratio_with_pad=False, contrast_adjust = 0.):
         self.imgH = imgH
         self.imgW = imgW
         self.keep_ratio_with_pad = keep_ratio_with_pad
+        self.contrast_adjust = contrast_adjust
 
     def __call__(self, batch):
         batch = filter(lambda x: x is not None, batch)
@@ -319,6 +257,13 @@ class AlignCollate(object):
             resized_images = []
             for image in images:
                 w, h = image.size
+
+                #### augmentation here - change contrast
+                if self.contrast_adjust > 0:
+                    image = np.array(image.convert("L"))
+                    image = adjust_contrast_grey(image, target = self.contrast_adjust)
+                    image = Image.fromarray(image, 'L')
+
                 ratio = w / float(h)
                 if math.ceil(self.imgH * ratio) > self.imgW:
                     resized_w = self.imgW
