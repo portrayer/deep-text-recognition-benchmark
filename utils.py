@@ -252,7 +252,7 @@ class CTCLabelConverter(object):
         text = ''.join(text)
         text = [self.dict[char] for char in text]
 
-        return (torch.IntTensor(text), torch.IntTensor(length))
+        return (torch.IntTensor(text).to(device), torch.IntTensor(length).to(device))
 
     def decode_greedy(self, text_index, length):
         """ convert text-index into text-label. """

@@ -6,13 +6,13 @@ train_data: 'data/train'
 valid_data: 'data/val'
 manualSeed: 1111
 workers: 6
-batch_size: 256 #32
+batch_size: 32 #32
 num_iter: 30000
 valInterval: 100
-saved_model: '' #'saved_models/en_filtered/iter_300000.pth'
+saved_model: 'my_ctc_finetune_starter.pth' #'saved_models/en_filtered/iter_300000.pth'
 FT: False
 optim: False # default is Adadelta
-lr: 1.
+lr: 0.1
 beta1: 0.9
 rho: 0.95
 eps: 0.00000001
